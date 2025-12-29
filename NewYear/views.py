@@ -579,11 +579,26 @@ class GiftCardBulkCreateView(APIView):
             "gift_cards": cards
         })
 
+    # def post(self, request):
+    #     codes = request.data.get("codes", [])
+
+    #     if not isinstance(codes, list) or not codes:
+    #         return Response({"error": "codes must be a non-empty list"}, status=400)
+
+    #     GiftCard.objects.bulk_create(
+    #         [GiftCard(code=c) for c in codes],
+    #         ignore_conflicts=True
+    #     )
+
+    #     return Response({"message": "Gift cards processed"}, status=201)
     def post(self, request):
-        codes = request.data.get("codes", [])
+        codes = request.data  # 👈 request.data is already a list
 
         if not isinstance(codes, list) or not codes:
-            return Response({"error": "codes must be a non-empty list"}, status=400)
+            return Response(
+                {"error": "Request body must be a non-empty list of codes"},
+                status=400
+            )
 
         GiftCard.objects.bulk_create(
             [GiftCard(code=c) for c in codes],
@@ -591,6 +606,7 @@ class GiftCardBulkCreateView(APIView):
         )
 
         return Response({"message": "Gift cards processed"}, status=201)
+
 
 
 class L2ApprovalView(APIView):
