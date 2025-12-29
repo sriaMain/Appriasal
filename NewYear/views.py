@@ -16,6 +16,7 @@ from reportlab.lib.pagesizes import A4
 from io import BytesIO
 from .models import SurveyQuestion, SurveyResponse
 
+
 from .models import (
     User,
     SurveyQuestion,
@@ -31,6 +32,7 @@ from .serializers import (
     LoginSerializer,
     SurveySerializer,
     SurveyQuestionSerializer,
+    ListSerializer
 )
 
 from .utils import auto_assign_managers
@@ -82,9 +84,19 @@ class RegisterView(APIView):
     def post(self, request):
         serializer = RegisterSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        serializer.save()
-        return Response({"message": "User registered successfully"}, status=201)
+        user = serializer.save()
 
+        return Response(
+            {
+                "message": "User registered successfully",
+                "data": RegisterSerializer(user).data
+            },
+            status=status.HTTP_201_CREATED
+        )
+    def get(self, request):
+        users = User.objects.all()
+        serializer = ListSerializer(users, many=True)
+        return Response({"users": serializer.data}, status=200)
 
 class LoginView(APIView):
     permission_classes = [AllowAny]
@@ -121,51 +133,51 @@ class LogoutView(APIView):
     def post(self, request):
         return Response({"message": "Logged out successfully"})
 
-
 class SurveyQuestionListView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def get(self, request):
-        questions = SurveyQuestion.objects.filter(is_active=True).order_by("order")
-        return Response([
-            {
-                "id": q.id,
-                "text": q.text,
-                "type": q.question_type,
-                "rating_min": q.rating_min,
-                "rating_max": q.rating_max
-            }
-            for q in questions
-        ])
+    def post(self, request):
+        if request.user.role not in ["L2_MANAGER", "ADMIN"] and not request.user.is_superuser:
+            return Response(
+                {"error": "Only Admin or L2 Manager can add survey questions"},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
-    # def post(self, request):
-    #     if request.user.role != "L2_MANAGER" and request.user.role != "ADMIN":
-    #         return Response({"error": "Only admin and L2 managers can add questions"}, status=403)
+        data = request.data
 
-    #     serializer = SurveyQuestionSerializer(data=request.data, many=True)
-    #     serializer.is_valid(raise_exception=True)
-    #     serializer.save()
-    #     return Response({"message": "Questions added"}, status=201)
-    
-def post(self, request):
-    if request.user.role not in ["L2_MANAGER", "ADMIN"]:
+        if isinstance(data, list):
+            serializer = SurveyQuestionSerializer(data=data, many=True)
+        else:
+            serializer = SurveyQuestionSerializer(data=data)
+
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
         return Response(
-            {"error": "Only admin and L2 managers can add questions"},
-            status=403
+            {"message": "Survey question(s) added successfully"},
+            status=status.HTTP_201_CREATED
         )
 
-    data = request.data
+    def get(self, request):
+        questions = SurveyQuestion.objects.filter(
+            is_active=True
+        ).order_by("order")
 
-    if isinstance(data, dict):
-        serializer = SurveyQuestionSerializer(data=data)
-    else:
-        serializer = SurveyQuestionSerializer(data=data, many=True)
+        return Response(
+            [
+                {
+                    "id": q.id,
+                    "text": q.text,
+                    "question_type": q.question_type,
+                    "rating_min": q.rating_min,
+                    "rating_max": q.rating_max,
+                }
+                for q in questions
+            ],
+            status=status.HTTP_200_OK
+        )
 
-    serializer.is_valid(raise_exception=True)
-    serializer.save()
-
-    return Response({"message": "Question(s) added successfully"}, status=201)
-
+    
 
 class SurveyQuestionDetailView(APIView):
     permission_classes = [IsAuthenticated]
@@ -224,21 +236,61 @@ class SurveyQuestionDetailView(APIView):
         return Response({"message": "Question deleted successfully"})
 
 
+# class SurveySubmitView(APIView):
+#     permission_classes = [IsAuthenticated]
+
+#     def post(self, request):
+#         already_submitted = SurveyResponse.objects.filter(
+#             user=request.user
+#         ).exists()
+
+#         if already_submitted:
+#             return Response(
+#                 {"error": "You have already submitted the survey"},
+#                 status=400
+#             )
+
+#         auto_assign_managers(request.user)
+
+#         serializer = SurveySerializer(data=request.data)
+#         serializer.is_valid(raise_exception=True)
+
+#         if request.user.role == "L1_MANAGER":
+#             status_value = "PENDING_L2"
+#         else:
+#             status_value = "PENDING_L1"
+
+#         survey = SurveyResponse.objects.create(
+#             user=request.user,
+#             answers=serializer.validated_data["answers"],
+#             status=status_value
+#         )
+
+#         return Response(
+#             {
+#                 "survey_id": survey.id,
+#                 "status": status_value
+#             },
+#             status=201
+#         )
+
 class SurveySubmitView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        already_submitted = SurveyResponse.objects.filter(
-            user=request.user
-        ).exists()
-
-        if already_submitted:
+        if SurveyResponse.objects.filter(user=request.user).exists():
             return Response(
                 {"error": "You have already submitted the survey"},
                 status=400
             )
 
-        auto_assign_managers(request.user)
+        try:
+            auto_assign_managers(request.user)
+        except ValidationError as e:
+            return Response(
+                {"error": e.message},
+                status=400
+            )
 
         serializer = SurveySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -261,7 +313,7 @@ class SurveySubmitView(APIView):
             },
             status=201
         )
-
+        
 def format_answers(answers):
     questions = SurveyQuestion.objects.filter(id__in=answers.keys())
     question_map = {str(q.id): q.text for q in questions}

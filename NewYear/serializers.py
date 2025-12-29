@@ -1,7 +1,5 @@
 from rest_framework import serializers
 from .models import User, SurveyResponse, SurveyQuestion, Department
-
-
 class RegisterSerializer(serializers.ModelSerializer):
     confirm_password = serializers.CharField(write_only=True)
 
@@ -18,11 +16,63 @@ class RegisterSerializer(serializers.ModelSerializer):
         ]
         extra_kwargs = {"password": {"write_only": True}}
 
+    def validate(self, data):
+        if data["password"] != data["confirm_password"]:
+            raise serializers.ValidationError("Passwords do not match")
+        return data
+
     def validate_department(self, value):
         if not Department.objects.filter(name=value).exists():
             raise serializers.ValidationError("Invalid department selected.")
         return value
 
+    def create(self, validated_data):
+        validated_data.pop("confirm_password")
+
+        user = User.objects.create_user(
+            username=validated_data["username"],
+            email=validated_data.get("email"),
+            password=validated_data["password"],
+            full_name=validated_data.get("full_name"),
+            department=validated_data.get("department"),
+            designation=validated_data.get("designation"),
+        )
+        return user
+
+
+# class RegisterSerializer(serializers.ModelSerializer):
+#     confirm_password = serializers.CharField(write_only=True)
+
+#     class Meta:
+#         model = User
+#         fields = [
+#             "username",
+#             "email",
+#             "full_name",
+#             "department",
+#             "designation",
+#             "password",
+#             "confirm_password",
+#         ]
+#         extra_kwargs = {"password": {"write_only": True}}
+
+#     def validate_department(self, value):
+#         if not Department.objects.filter(name=value).exists():
+#             raise serializers.ValidationError("Invalid department selected.")
+#         return value
+#     def create(self, validated_data):
+#         validated_data.pop('confirm_password')  # ✅ remove extra field
+#         user = User.objects.create_user(
+#             username=validated_data['username'],
+#             email=validated_data.get('email'),
+#             password=validated_data['password']
+#         )
+#         return user
+class ListSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = "__all__"
+        
 
 
     def create(self, validated_data):
