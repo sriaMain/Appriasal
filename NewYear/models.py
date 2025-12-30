@@ -4,77 +4,49 @@ from django.contrib.auth.models import (
     PermissionsMixin,
     BaseUserManager
 )
-
-
-class Department(models.Model):
-    name = models.CharField(max_length=100, unique=True)
-
-    def __str__(self):
-        return self.name
+from django.utils import timezone
 
 
 class UserManager(BaseUserManager):
-    def create_user(self, username, email, password=None, **extra_fields):
-        if not username:
-            raise ValueError("Username is required")
-        if not email:
-            raise ValueError("Email is required")
+    def create_user(self, username, email, password=None, role="EMPLOYEE"):
+        if not username or not email:
+            raise ValueError("Username and email are required")
 
-        email = self.normalize_email(email)
-        user = self.model(username=username, email=email, **extra_fields)
+        user = self.model(
+            username=username,
+            email=self.normalize_email(email),
+            role=role
+        )
         user.set_password(password)
         user.save(using=self._db)
         return user
 
-    def create_superuser(self, username, email, password, **extra_fields):
-        extra_fields.setdefault("is_staff", True)
-        extra_fields.setdefault("is_superuser", True)
-        extra_fields.setdefault("role", "ADMIN")
-        return self.create_user(username, email, password, **extra_fields)
+    def create_superuser(self, username, email, password):
+        return self.create_user(
+            username=username,
+            email=email,
+            password=password,
+            role="ADMIN"
+        )
 
 
 class User(AbstractBaseUser, PermissionsMixin):
     ROLE_CHOICES = (
         ("EMPLOYEE", "Employee"),
-        ("L1_MANAGER", "L1 Manager"),
-        ("L2_MANAGER", "L2 Manager"),
         ("ADMIN", "Admin"),
     )
 
     username = models.CharField(max_length=50, unique=True)
     email = models.EmailField(unique=True)
-
-    full_name = models.CharField(max_length=100)
-    designation = models.CharField(max_length=50)
-    department = models.CharField(max_length=50)
-
-    l1_manager = models.ForeignKey(
-        "self",
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="l1_team"
-    )
-
-    l2_departments = models.ManyToManyField(
-        Department,
-        blank=True,
-        related_name="l2_managers"
-    )
-
-    role = models.CharField(
-        max_length=20,
-        choices=ROLE_CHOICES,
-        default="EMPLOYEE"
-    )
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default="EMPLOYEE")
 
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
 
-    objects = UserManager()
-
     USERNAME_FIELD = "username"
     REQUIRED_FIELDS = ["email"]
+
+    objects = UserManager()
 
     def __str__(self):
         return self.username
@@ -82,7 +54,7 @@ class User(AbstractBaseUser, PermissionsMixin):
 
 class SurveyQuestion(models.Model):
     QUESTION_TYPES = (
-        ("TEXT", "Long Answer"),
+        ("TEXT", "Text"),
         ("RATING", "Rating"),
     )
 
@@ -90,26 +62,24 @@ class SurveyQuestion(models.Model):
     question_type = models.CharField(max_length=10, choices=QUESTION_TYPES)
     rating_min = models.IntegerField(null=True, blank=True)
     rating_max = models.IntegerField(null=True, blank=True)
-    is_active = models.BooleanField(default=True)
     order = models.IntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["order"]
 
     def __str__(self):
         return self.text
 
 
 class SurveyResponse(models.Model):
-    STATUS_CHOICES = (
-        ("PENDING_L1", "Pending L1"),
-        ("PENDING_L2", "Pending L2"),
-        ("REJECTED", "Rejected"),
-        ("APPROVED", "Approved"),
+    user = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        related_name="survey"
     )
-
-    user = models.ForeignKey(User, on_delete=models.CASCADE)
     answers = models.JSONField()
-    l1_feedback = models.TextField(null=True, blank=True)
-    l2_feedback = models.TextField(null=True, blank=True)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES)
+    status = models.CharField(max_length=20, default="APPROVED")
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -126,7 +96,6 @@ class GiftCard(models.Model):
         blank=True,
         on_delete=models.SET_NULL
     )
-
     assigned_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
@@ -135,8 +104,8 @@ class GiftCard(models.Model):
 
 class EmployeeProfile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
-    total_surveys = models.IntegerField(default=0)
-    total_rewards = models.IntegerField(default=0)
+    total_surveys = models.PositiveIntegerField(default=0)
+    total_rewards = models.PositiveIntegerField(default=0)
 
     def __str__(self):
         return self.user.username
@@ -145,9 +114,9 @@ class EmployeeProfile(models.Model):
 class AppraisalRecord(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     answers = models.JSONField()
-    l1_feedback = models.TextField(null=True, blank=True)
-    l2_feedback = models.TextField()
-    reward_given = models.BooleanField(default=False)
-    reward_code = models.CharField(max_length=100, null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
+    reward_given = models.BooleanField(default=True)
+    reward_code = models.CharField(max_length=100)
+    created_at = models.DateTimeField(default=timezone.now)
 
+    def __str__(self):
+        return f"Appraisal - {self.user.username}"

@@ -1,4 +1,3 @@
-from rest_framework.authentication import SessionAuthentication, BasicAuthentication
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
@@ -6,16 +5,15 @@ from rest_framework import status
 from rest_framework.exceptions import ValidationError
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
-from django.contrib.auth import authenticate
+
 from django.db import transaction
 from django.utils import timezone
 from django.db.models import Q
 from django.http import HttpResponse
+
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from io import BytesIO
-from .models import SurveyQuestion, SurveyResponse
-
 
 from .models import (
     User,
@@ -24,18 +22,15 @@ from .models import (
     GiftCard,
     EmployeeProfile,
     AppraisalRecord,
-    Department,
 )
 
 from .serializers import (
     RegisterSerializer,
-    LoginSerializer,
     SurveySerializer,
     SurveyQuestionSerializer,
-    ListSerializer
+    ListSerializer,
 )
 
-from .utils import auto_assign_managers
 from .emails import send_gift_card_email
 
 
@@ -44,37 +39,13 @@ class RefreshTokenView(APIView):
 
     def post(self, request):
         refresh_token = request.data.get("refresh")
-
         if not refresh_token:
             return Response({"error": "Refresh token is required"}, status=400)
-
         try:
             token = RefreshToken(refresh_token)
             return Response({"access": str(token.access_token)})
         except TokenError:
             return Response({"error": "Invalid or expired refresh token"}, status=401)
-
-
-class DepartmentListView(APIView):
-    permission_classes = [AllowAny]
-
-    def get(self, request):
-        departments = Department.objects.all().order_by("name").values_list("name", flat=True)
-        return Response({"departments": list(departments)})
-
-    def post(self, request):
-        if not request.user.is_authenticated or request.user.role != "ADMIN":
-            return Response({"error": "Only admins can add departments"}, status=403)
-
-        name = request.data.get("name")
-        if not name:
-            return Response({"error": "Department name is required"}, status=400)
-
-        department, created = Department.objects.get_or_create(name=name)
-        if not created:
-            return Response({"error": "Department already exists"}, status=400)
-
-        return Response({"message": "Department added successfully", "name": department.name}, status=201)
 
 
 class RegisterView(APIView):
@@ -85,18 +56,19 @@ class RegisterView(APIView):
         serializer = RegisterSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
-
         return Response(
             {
                 "message": "User registered successfully",
                 "data": RegisterSerializer(user).data
             },
-            status=status.HTTP_201_CREATED
+            status=201
         )
+
     def get(self, request):
         users = User.objects.all()
         serializer = ListSerializer(users, many=True)
-        return Response({"users": serializer.data}, status=200)
+        return Response({"users": serializer.data})
+
 
 class LoginView(APIView):
     permission_classes = [AllowAny]
@@ -122,7 +94,7 @@ class LoginView(APIView):
                 "id": user.id,
                 "username": user.username,
                 "email": user.email,
-                "role": user.role,
+                "role": user.role
             }
         })
 
@@ -133,471 +105,160 @@ class LogoutView(APIView):
     def post(self, request):
         return Response({"message": "Logged out successfully"})
 
-class SurveyQuestionListView(APIView):
+
+class SurveyQuestionView(APIView):
     permission_classes = [IsAuthenticated]
 
+    def get(self, request):
+        questions = SurveyQuestion.objects.filter(is_active=True).order_by("order")
+        serializer = SurveyQuestionSerializer(questions, many=True)
+        return Response(serializer.data)
+
     def post(self, request):
-        if request.user.role not in ["L2_MANAGER", "ADMIN"] and not request.user.is_superuser:
-            return Response(
-                {"error": "Only Admin or L2 Manager can add survey questions"},
-                status=status.HTTP_403_FORBIDDEN
-            )
+        if request.user.role != "ADMIN":
+            return Response({"error": "Only admin can add survey questions"}, status=403)
 
         data = request.data
-
-        if isinstance(data, list):
-            serializer = SurveyQuestionSerializer(data=data, many=True)
-        else:
-            serializer = SurveyQuestionSerializer(data=data)
-
+        serializer = (
+            SurveyQuestionSerializer(data=data, many=True)
+            if isinstance(data, list)
+            else SurveyQuestionSerializer(data=data)
+        )
         serializer.is_valid(raise_exception=True)
         serializer.save()
 
-        return Response(
-            {"message": "Survey question(s) added successfully"},
-            status=status.HTTP_201_CREATED
-        )
+        return Response({"message": "Survey question(s) added successfully"}, status=201)
 
-    def get(self, request):
-        questions = SurveyQuestion.objects.filter(
-            is_active=True
-        ).order_by("order")
+    def put(self, request, question_id=None):
+        if request.user.role != "ADMIN":
+            return Response({"error": "Only admin can update survey questions"}, status=403)
 
-        return Response(
-            [
-                {
-                    "id": q.id,
-                    "text": q.text,
-                    "question_type": q.question_type,
-                    "rating_min": q.rating_min,
-                    "rating_max": q.rating_max,
-                }
-                for q in questions
-            ],
-            status=status.HTTP_200_OK
-        )
-
-    
-
-class SurveyQuestionDetailView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get_object(self, question_id):
-        try:
-            return SurveyQuestion.objects.get(id=question_id)
-        except SurveyQuestion.DoesNotExist:
-            return None
-
-    def put(self, request, question_id):
-        if request.user.role not in ["L2_MANAGER", "ADMIN"]:
-            return Response(
-                {"error": "Only admin and L2 managers can update questions"},
-                status=403
-            )
+        if not question_id:
+            return Response({"error": "question_id is required"}, status=400)
 
         try:
             question = SurveyQuestion.objects.get(id=question_id)
         except SurveyQuestion.DoesNotExist:
-            return Response(
-                {"error": "Question not found"},
-                status=404
-            )
+            return Response({"error": "Question not found"}, status=404)
 
-        serializer = SurveyQuestionSerializer(
-            question,
-            data=request.data,
-            partial=True
-        )
-
+        serializer = SurveyQuestionSerializer(question, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
 
-        return Response(
-            {
-                "message": "Question updated successfully",
-                "data": serializer.data
-            },
-            status=200
-        )
+        return Response({"message": "Survey question updated successfully", "data": serializer.data})
 
+    def delete(self, request, question_id=None):
+        if request.user.role != "ADMIN":
+            return Response({"error": "Only admin can delete survey questions"}, status=403)
 
+        if not question_id:
+            return Response({"error": "question_id is required"}, status=400)
 
-    def delete(self, request, question_id):
-        if request.user.role not in ["L2_MANAGER", "ADMIN"]:
-            return Response({"error": "Forbidden"}, status=403)
-
-        question = self.get_object(question_id)
-        if not question:
+        try:
+            question = SurveyQuestion.objects.get(id=question_id)
+        except SurveyQuestion.DoesNotExist:
             return Response({"error": "Question not found"}, status=404)
 
         question.is_active = False
         question.save(update_fields=["is_active"])
 
-        return Response({"message": "Question deleted successfully"})
+        return Response({"message": "Survey question deleted successfully"})
 
-
-# class SurveySubmitView(APIView):
-#     permission_classes = [IsAuthenticated]
-
-#     def post(self, request):
-#         already_submitted = SurveyResponse.objects.filter(
-#             user=request.user
-#         ).exists()
-
-#         if already_submitted:
-#             return Response(
-#                 {"error": "You have already submitted the survey"},
-#                 status=400
-#             )
-
-#         auto_assign_managers(request.user)
-
-#         serializer = SurveySerializer(data=request.data)
-#         serializer.is_valid(raise_exception=True)
-
-#         if request.user.role == "L1_MANAGER":
-#             status_value = "PENDING_L2"
-#         else:
-#             status_value = "PENDING_L1"
-
-#         survey = SurveyResponse.objects.create(
-#             user=request.user,
-#             answers=serializer.validated_data["answers"],
-#             status=status_value
-#         )
-
-#         return Response(
-#             {
-#                 "survey_id": survey.id,
-#                 "status": status_value
-#             },
-#             status=201
-#         )
 
 class SurveySubmitView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @transaction.atomic
     def post(self, request):
+        if request.user.role != "EMPLOYEE":
+            return Response(
+                {"error": "Only employees are allowed to submit the survey"},
+                status=403
+            )
+
         if SurveyResponse.objects.filter(user=request.user).exists():
             return Response(
                 {"error": "You have already submitted the survey"},
                 status=400
             )
 
-        try:
-            auto_assign_managers(request.user)
-        except ValidationError as e:
-            return Response(
-                {"error": e.message},
-                status=400
-            )
-
         serializer = SurveySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-
-        if request.user.role == "L1_MANAGER":
-            status_value = "PENDING_L2"
-        else:
-            status_value = "PENDING_L1"
 
         survey = SurveyResponse.objects.create(
             user=request.user,
             answers=serializer.validated_data["answers"],
-            status=status_value
+            status="APPROVED"
         )
+
+        gift_card = GiftCard.objects.select_for_update().filter(is_used=False).first()
+        if not gift_card:
+            raise ValidationError("No gift cards available")
+
+        gift_card.is_used = True
+        gift_card.assigned_to = request.user
+        gift_card.assigned_at = timezone.now()
+        gift_card.save()
+
+       
+        send_gift_card_email(
+            request.user.email,
+            gift_card.code,
+            request.user.username
+        )
+
+        AppraisalRecord.objects.create(
+            user=request.user,
+            answers=survey.answers,
+            reward_given=True,
+            reward_code=gift_card.code
+        )
+
+        profile, _ = EmployeeProfile.objects.get_or_create(user=request.user)
+        profile.total_surveys += 1
+        profile.total_rewards += 1
+        profile.save()
 
         return Response(
             {
-                "survey_id": survey.id,
-                "status": status_value
+                "message": "Survey submitted successfully. Gift card sent.",
+                "survey_id": survey.id
             },
             status=201
         )
-        
-def format_answers(answers):
-    questions = SurveyQuestion.objects.filter(id__in=answers.keys())
-    question_map = {str(q.id): q.text for q in questions}
 
-    return [
-        {
-            "question_id": int(q_id),
-            "question": question_map.get(str(q_id)),
-            "answer": ans
-        }
-        for q_id, ans in answers.items()
-    ]
 
 class EmployeeSurveyStatusView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         surveys = SurveyResponse.objects.filter(user=request.user)
-
         return Response([
             {
                 "survey_id": s.id,
-                "responses": build_question_answers(s.answers),
-                "l1_feedback": s.l1_feedback,
-                "l2_feedback": s.l2_feedback,
-                "status": s.status
+                "answers": s.answers,
+                "status": s.status,
+                "submitted_at": s.created_at
             }
             for s in surveys
         ])
-
-
-def build_question_answers(answers):
-    if not answers:
-        return []
-
-    question_ids = [int(qid) for qid in answers.keys()]
-    questions = SurveyQuestion.objects.filter(id__in=question_ids)
-
-    question_map = {str(q.id): q.text for q in questions}
-
-    return [
-        {
-            "question_id": int(qid),
-            "question": question_map.get(str(qid)),
-            "answer": answer
-        }
-        for qid, answer in answers.items()
-    ]
-
-
-class L1SurveyListView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        if request.user.role not in ["L1_MANAGER", "ADMIN"] and not request.user.is_superuser:
-            return Response({"error": "Forbidden"}, status=403)
-
-        surveys = SurveyResponse.objects.filter(
-            status="PENDING_L1"
-        ) if request.user.role == "ADMIN" else SurveyResponse.objects.filter(
-            status="PENDING_L1",
-            user__l1_manager=request.user
-        )
-
-        return Response([
-    {
-        "survey_id": s.id,
-        "employee": s.user.full_name,
-        "department": s.user.department,
-        "responses": format_answers(s.answers),
-        "l1_feedback": s.l1_feedback,
-        "status": s.status
-    }
-    for s in surveys
-])
-
-
-
-class L1ApprovalView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request, survey_id):
-        survey = SurveyResponse.objects.get(id=survey_id, status="PENDING_L1")
-
-        survey.l1_feedback = request.data.get("feedback")
-        survey.status = "PENDING_L2"
-        survey.save()
-
-        return Response({"message": "Forwarded to L2"})
-
-class L1PendingReviewsView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        if request.user.role != "L1_MANAGER":
-            return Response({"error": "Forbidden"}, status=403)
-
-        surveys = SurveyResponse.objects.filter(
-            status="PENDING_L1",
-            user__l1_manager=request.user
-        )
-
-        return Response([
-            {
-                "survey_id": s.id,
-                "employee": s.user.full_name,
-                "department": s.user.department,
-                "responses": build_question_answers(s.answers),
-                "status": s.status
-            }
-            for s in surveys
-        ])
-
-
-
-class L1CompletedReviewsView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        if request.user.role != "L1_MANAGER":
-            return Response({"error": "Forbidden"}, status=403)
-
-        surveys = SurveyResponse.objects.filter(
-            user__l1_manager=request.user,
-            status__in=["PENDING_L2", "APPROVED", "REJECTED"]
-        )
-
-        return Response([
-            {
-                "survey_id": s.id,
-                "employee": s.user.full_name,
-                "department": s.user.department,
-                "l1_feedback": s.l1_feedback,
-                "status": s.status
-            }
-            for s in surveys
-        ])
-
-
-class L2PendingReviewsView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        if request.user.role not in ["L2_MANAGER", "ADMIN"]:
-            return Response({"error": "Forbidden"}, status=403)
-
-        surveys = SurveyResponse.objects.filter(status="PENDING_L2")
-
-        return Response([
-            {
-                "survey_id": s.id,
-                "employee": s.user.full_name,
-                "department": s.user.department,
-                "responses": build_question_answers(s.answers),
-                "l1_review": {
-                    "feedback": s.l1_feedback
-                },
-                "l2_review": {
-                    "feedback": s.l2_feedback
-                },
-                "status": s.status
-            }
-            for s in surveys
-        ])
-
-
-
-class L2CompletedReviewsView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        if request.user.role not in ["L2_MANAGER", "ADMIN"]:
-            return Response({"error": "Forbidden"}, status=403)
-
-        surveys = SurveyResponse.objects.filter(
-            status__in=["APPROVED", "REJECTED"]
-        )
-
-        return Response([
-            {
-                "survey_id": s.id,
-                "employee": s.user.full_name,
-                "department": s.user.department,
-                "responses": build_question_answers(s.answers),
-                "l1_review": {
-                    "feedback": s.l1_feedback
-                },
-                "l2_review": {
-                    "feedback": s.l2_feedback
-                },
-                "status": s.status
-            }
-            for s in surveys
-        ])
-
-
-
-
-@transaction.atomic
-def assign_gift_card(user):
-    gift_card = GiftCard.objects.select_for_update().filter(is_used=False).first()
-    if not gift_card:
-        raise ValidationError("No gift cards available")
-
-    gift_card.is_used = True
-    gift_card.assigned_to = user
-    gift_card.assigned_at = timezone.now()
-    gift_card.save()
-    return gift_card
-
-
-class L2SurveyListView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        if request.user.role not in ["L2_MANAGER", "ADMIN"]:
-            return Response({"error": "Forbidden"}, status=403)
-
-        surveys = SurveyResponse.objects.filter(status="PENDING_L2")
-
-        return Response([
-    {
-        "survey_id": s.id,
-        "employee": s.user.full_name,
-        "department": s.user.department,
-        "responses": format_answers(s.answers),
-        "l1_feedback": s.l1_feedback,
-        "l2_feedback": s.l2_feedback,
-        "status": s.status
-    }
-    for s in surveys
-])
-    
-
 
 
 class GiftCardBulkCreateView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAuthenticated]
 
-    def get(self, request):
-        gift_cards = GiftCard.objects.all().order_by("-id")
-
-        total = gift_cards.count()
-        used = gift_cards.filter(is_used=True).count()
-        remaining = total - used
-
-        cards = [
-            {
-                "id": g.id,
-                "is_used": g.is_used,
-                "assigned_to": g.assigned_to.username if g.assigned_to else None,
-                "assigned_at": g.assigned_at,
-            }
-            for g in gift_cards
-        ]
-
-        return Response({
-            "stats": {
-                "total": total,
-                "used": used,
-                "remaining": remaining
-            },
-            "gift_cards": cards
-        })
-
-    # def post(self, request):
-    #     codes = request.data.get("codes", [])
-
-    #     if not isinstance(codes, list) or not codes:
-    #         return Response({"error": "codes must be a non-empty list"}, status=400)
-
-    #     GiftCard.objects.bulk_create(
-    #         [GiftCard(code=c) for c in codes],
-    #         ignore_conflicts=True
-    #     )
-
-    #     return Response({"message": "Gift cards processed"}, status=201)
     def post(self, request):
-        codes = request.data  # 👈 request.data is already a list
+        if request.user.role != "ADMIN":
+            return Response(
+                {"error": "Only admin can add gift cards"},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
+        codes = request.data
         if not isinstance(codes, list) or not codes:
             return Response(
-                {"error": "Request body must be a non-empty list of codes"},
-                status=400
+                {"error": "Request body must be a non-empty list"},
+                status=status.HTTP_400_BAD_REQUEST
             )
 
         GiftCard.objects.bulk_create(
@@ -605,60 +266,105 @@ class GiftCardBulkCreateView(APIView):
             ignore_conflicts=True
         )
 
-        return Response({"message": "Gift cards processed"}, status=201)
-
-
-
-class L2ApprovalView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    @transaction.atomic
-    def post(self, request, survey_id):
-        try:
-            survey = (
-                SurveyResponse.objects
-                .select_for_update()
-                .get(id=survey_id)
-            )
-        except SurveyResponse.DoesNotExist:
-            return Response(
-                {"error": "Survey not found"},
-                status=404
-            )
-
-        if survey.status != "PENDING_L2":
-            return Response(
-                {"error": "Survey already reviewed"},
-                status=400
-            )
-
-        action = request.data.get("action")
-        feedback = request.data.get("feedback")
-
-        if action == "REJECT":
-            survey.l2_feedback = feedback
-            survey.status = "REJECTED"
-            survey.save(update_fields=["l2_feedback", "status"])
-            return Response({"message": "Survey rejected"})
-
-        survey.l2_feedback = feedback
-        survey.status = "APPROVED"
-        survey.save(update_fields=["l2_feedback", "status"])
-
-        gift = assign_gift_card(survey.user)
-        send_gift_card_email(survey.user.email, gift.code)
-
-        AppraisalRecord.objects.create(
-            user=survey.user,
-            answers=survey.answers,
-            l1_feedback=survey.l1_feedback,
-            l2_feedback=survey.l2_feedback,
-            reward_given=True,
-            reward_code=gift.code
+        return Response(
+            {"message": "Gift cards added successfully"},
+            status=status.HTTP_201_CREATED
         )
 
-        return Response({"message": "Survey approved"})
     
+    def get(self, request):
+        if request.user.role != "ADMIN":
+            return Response(
+                {"error": "Only admin can view gift cards"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        gift_cards = GiftCard.objects.all().order_by("-id")
+        total = gift_cards.count()
+        used = gift_cards.filter(is_used=True).count()
+
+        return Response({
+            "stats": {
+                "total": total,
+                "used": used,
+                "remaining": total - used
+            },
+            "gift_cards": [
+                {
+                    "id": g.id,
+                    "code": g.code,
+                    "is_used": g.is_used,
+                    "assigned_to": g.assigned_to.username if g.assigned_to else None,
+                    "assigned_at": g.assigned_at
+                }
+                for g in gift_cards
+            ]
+        }, status=status.HTTP_200_OK)
+
+    def put(self, request, giftcard_id=None):
+        if request.user.role != "ADMIN":
+            return Response({"error": "Only admin can update gift cards"}, status=403)
+
+        if not giftcard_id:
+            return Response({"error": "giftcard_id is required"}, status=400)
+
+        new_code = request.data.get("code")
+        if not new_code:
+            return Response({"error": "New code is required"}, status=400)
+
+        try:
+            gift_card = GiftCard.objects.get(id=giftcard_id)
+        except GiftCard.DoesNotExist:
+            return Response({"error": "Gift card not found"}, status=404)
+
+        if gift_card.is_used:
+            return Response({"error": "Used gift cards cannot be updated"}, status=400)
+
+        gift_card.code = new_code
+        gift_card.save(update_fields=["code"])
+
+        return Response({"message": "Gift card updated successfully"}, status=200)
+
+
+    def delete(self, request, giftcard_id=None):
+        if request.user.role != "ADMIN":
+            return Response(
+                {"error": "Only admin can delete gift cards"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        ids = request.data.get("ids")
+
+        if not isinstance(ids, list) or not ids:
+            return Response(
+                {"error": "ids must be a non-empty list"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        gift_cards = GiftCard.objects.filter(id__in=ids)
+
+        if gift_cards.count() != len(ids):
+            return Response(
+                {"error": "One or more gift cards not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        if gift_cards.filter(is_used=True).exists():
+            return Response(
+                {"error": "Used gift cards cannot be deleted"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        deleted_count = gift_cards.count()
+        gift_cards.delete()
+
+        return Response(
+            {
+                "message": f"{deleted_count} gift cards deleted successfully"
+            },
+            status=status.HTTP_200_OK
+        )
+
 class EmployeePDFView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -666,37 +372,29 @@ class EmployeePDFView(APIView):
         surveys = SurveyResponse.objects.filter(user=request.user)
 
         buffer = BytesIO()
-        p = canvas.Canvas(buffer, pagesize=A4)
+        pdf = canvas.Canvas(buffer, pagesize=A4)
         y = 800
 
-        p.setFont("Helvetica", 10)
-        p.drawString(50, y, f"Employee: {request.user.full_name}")
+        pdf.setFont("Helvetica", 10)
+        pdf.drawString(50, y, f"Employee: {request.user.username}")
         y -= 30
 
         for survey in surveys:
-            p.drawString(50, y, f"Survey ID: {survey.id}")
+            pdf.drawString(50, y, f"Survey ID: {survey.id}")
             y -= 20
 
-            for q_id, answer in survey.answers.items():
-                p.drawString(70, y, f"Q{q_id}: {answer}")
+            for q_id, ans in survey.answers.items():
+                pdf.drawString(70, y, f"Q{q_id}: {ans}")
                 y -= 15
 
-            if survey.l1_feedback:
-                p.drawString(70, y, f"L1 Feedback: {survey.l1_feedback}")
-                y -= 15
-
-            if survey.l2_feedback:
-                p.drawString(70, y, f"L2 Feedback: {survey.l2_feedback}")
-                y -= 15
-
-            p.drawString(70, y, f"Status: {survey.status}")
+            pdf.drawString(70, y, f"Status: {survey.status}")
             y -= 30
 
             if y < 100:
-                p.showPage()
+                pdf.showPage()
                 y = 800
 
-        p.save()
+        pdf.save()
         buffer.seek(0)
 
         return HttpResponse(
@@ -706,40 +404,30 @@ class EmployeePDFView(APIView):
         )
 
 
-class L1SurveyDetailView(APIView):
+class AdminSurveyResponsesView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def get(self, request, survey_id):
-        if not (request.user.role in ["L1_MANAGER", "ADMIN"] or request.user.is_superuser):
-            return Response({"error": "Not authorized"}, status=403)
+    def get(self, request):
+        if request.user.role != "ADMIN":
+            return Response(
+                {"error": "Only admin can view survey responses"},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
-        survey = SurveyResponse.objects.get(id=survey_id)
+        surveys = SurveyResponse.objects.select_related("user").order_by("-created_at")
 
-        return Response({
-            "survey_id": survey.id,
-            "employee": survey.user.full_name,
-            "department": survey.user.department,
-            "answers": survey.answers,
-            "l1_feedback": survey.l1_feedback,
-            "status": survey.status
-        })
+        data = [
+            {
+                "survey_id": s.id,
+                "employee": {
+                    "username": s.user.username,
+                    "email": s.user.email,
+                },
+                "answers": s.answers,
+                "status": s.status,
+                "submitted_at": s.created_at,
+            }
+            for s in surveys
+        ]
 
-
-class L2SurveyDetailView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request, survey_id):
-        if not (request.user.role in ["L2_MANAGER", "ADMIN"] or request.user.is_superuser):
-            return Response({"error": "Not authorized"}, status=403)
-
-        survey = SurveyResponse.objects.get(id=survey_id)
-
-        return Response({
-            "survey_id": survey.id,
-            "employee": survey.user.full_name,
-            "department": survey.user.department,
-            "answers": survey.answers,
-            "l1_feedback": survey.l1_feedback,
-            "l2_feedback": survey.l2_feedback,
-            "status": survey.status
-        })
+        return Response(data, status=status.HTTP_200_OK)
