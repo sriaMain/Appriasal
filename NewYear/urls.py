@@ -27,6 +27,7 @@ urlpatterns = [
 
     path("giftcards/", GiftCardBulkCreateView.as_view()),
     path("giftcards/<int:giftcard_id>/", GiftCardBulkCreateView.as_view()),
+    
     path("admin/surveys/", AdminSurveyResponsesView.as_view()),
 
 ]
